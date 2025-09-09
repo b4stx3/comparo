@@ -1,10 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Separator } from "@/components/ui/separator";
 import { 
   TrendingDown, 
   TrendingUp, 
@@ -24,18 +23,55 @@ interface ProductViewProps {
   amazonData: AmazonResponse | null;
 }
 
+// === Config bloqueo IA ===
+const IA_BLOCK_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 días (ajústalo)
+
+function makeAnalyzeKey(v: VerificadorResponse) {
+  // Usamos tienda + URL canónica si existe, si no, la URL de verificador
+  const raw = (v.amazon_url || v.verificador_url || "").trim().toLowerCase();
+  const tienda = (v.tienda || "desconocida").trim().toLowerCase();
+  return `ai:analyzed:${tienda}:${raw}`;
+}
+
 export function ProductView({ verificadorData, amazonData }: ProductViewProps) {
   const [analysis, setAnalysis] = useState<AnalysisResponse | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
 
+  const analyzeKey = useMemo(() => makeAnalyzeKey(verificadorData), [verificadorData]);
+  const [hasAnalyzed, setHasAnalyzed] = useState(false);
+
+  // Al montar, miramos si ya se analizó esta URL recientemente
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(analyzeKey);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as { ts: number } | null;
+      if (!parsed?.ts) return;
+      const fresh = Date.now() - parsed.ts < IA_BLOCK_TTL_MS;
+      setHasAnalyzed(fresh);
+      // Limpieza si expiró
+      if (!fresh) localStorage.removeItem(analyzeKey);
+    } catch {
+      // ignorar errores de parseo
+    }
+  }, [analyzeKey]);
+
   const handleAnalyze = async () => {
+    // doble click guard: por si acaso
+    if (isAnalyzing || hasAnalyzed) return;
+
     setIsAnalyzing(true);
     try {
       const result = await analyze(amazonData?.product || null, verificadorData);
       setAnalysis(result);
+
+      // Sólo guardamos bloqueo si la llamada fue OK y la IA devolvió json
+      if (result?.ok && result?.json) {
+        localStorage.setItem(analyzeKey, JSON.stringify({ ts: Date.now() }));
+        setHasAnalyzed(true);
+      }
     } catch (error) {
       console.error("Error en análisis:", error);
-      // Mostrar error al usuario
       alert("Error al realizar el análisis. Por favor, inténtalo de nuevo.");
     } finally {
       setIsAnalyzing(false);
@@ -53,14 +89,13 @@ export function ProductView({ verificadorData, amazonData }: ProductViewProps) {
   const getPriceStats = () => {
     if (!verificadorData.has_serie_historica || verificadorData.serie_historica.length === 0) {
       // Si no hay histórico, usar el precio de Amazon si está disponible, sino el precio destacado
-      let currentPrice;
+      let currentPrice: number;
       if (amazonData?.product?.price) {
         currentPrice = amazonData.product.price;
       } else {
         const precioDestacado = verificadorData.precios_destacados[0]?.precio;
-        currentPrice = precioDestacado ? parseFloat(precioDestacado.replace(/[€,\s]/g, '').replace(',', '.')) : 0;
+        currentPrice = precioDestacado ? parseFloat(precioDestacado.replace(/[€\s]/g, '').replace(',', '.')) : 0;
       }
-      
       return {
         current: currentPrice,
         min: currentPrice,
@@ -71,11 +106,12 @@ export function ProductView({ verificadorData, amazonData }: ProductViewProps) {
     }
 
     const prices = verificadorData.serie_historica.map(item => item.precio);
-    // El último precio debe ser el más reciente del histórico, o el de Amazon si está disponible
-    const sortedData = [...verificadorData.serie_historica].sort((a, b) => new Date(b.fecha).getTime() - new Date(a.fecha).getTime());
-    let currentPrice;
-    let lastDate;
-    
+    const sortedData = [...verificadorData.serie_historica].sort(
+      (a, b) => new Date(b.fecha).getTime() - new Date(a.fecha).getTime()
+    );
+    let currentPrice: number;
+    let lastDate: string;
+
     if (amazonData?.product?.price) {
       currentPrice = amazonData.product.price;
       lastDate = amazonData.product.date || new Date().toISOString();
@@ -83,75 +119,55 @@ export function ProductView({ verificadorData, amazonData }: ProductViewProps) {
       currentPrice = sortedData[0]?.precio || prices[prices.length - 1];
       lastDate = sortedData[0]?.fecha || new Date().toISOString();
     }
-    
+
     return {
       current: currentPrice,
       min: Math.min(...prices),
       max: Math.max(...prices),
       avg: prices.reduce((a, b) => a + b, 0) / prices.length,
-      lastDate: lastDate
+      lastDate
     };
   };
 
   const formatDate = (dateStr: string) => {
     const date = new Date(dateStr);
-    return date.toLocaleDateString("es-ES", { 
-      year: "numeric",
-      month: "short", 
-      day: "numeric" 
-    });
+    return date.toLocaleDateString("es-ES", { year: "numeric", month: "short", day: "numeric" });
   };
 
-  // Función para generar enlaces de afiliados
+  // Enlace de afiliado (igual que tenías)
   const getAffiliateLink = (originalUrl: string, store: string) => {
-    // Configuración de afiliados (esto debería venir de variables de entorno)
     const AMAZON_TAG = "tagafiliado-21";
     const AWIN_AFFILIATE_ID = "123456";
     const AWIN_CLICKREF = "webhistorial-precios";
-    
-    // Merchant IDs de Awin para cada tienda
-    const AWIN_MERCHANTS = {
+    const AWIN_MERCHANTS: Record<string, string> = {
       carrefour: "7890",
       mediamarkt: "1234",
       "el corte inglés": "5678",
       fnac: "9012",
-      // Añadir más según sea necesario
     };
-
     try {
       const url = new URL(originalUrl);
-      
-      // Amazon
-      if (url.hostname.includes('amazon')) {
+      if (url.hostname.includes("amazon")) {
         const dpMatch = url.pathname.match(/\/dp\/([A-Z0-9]{10})/);
-        if (dpMatch) {
-          return `https://www.amazon.es/dp/${dpMatch[1]}?tag=${AMAZON_TAG}`;
-        }
-        // Si no encontramos el DP, añadir el tag como parámetro
-        url.searchParams.set('tag', AMAZON_TAG);
+        if (dpMatch) return `https://www.amazon.es/dp/${dpMatch[1]}?tag=${AMAZON_TAG}`;
+        url.searchParams.set("tag", AMAZON_TAG);
         return url.toString();
       }
-      
-      // Otras tiendas con Awin
-      const storeLower = store.toLowerCase();
-      const merchantId = AWIN_MERCHANTS[storeLower as keyof typeof AWIN_MERCHANTS];
-      
+      const storeLower = (store || "").toLowerCase();
+      const merchantId = AWIN_MERCHANTS[storeLower];
       if (merchantId) {
         const encodedUrl = encodeURIComponent(originalUrl);
         return `https://www.awin1.com/cread.php?awinmid=${merchantId}&awinaffid=${AWIN_AFFILIATE_ID}&clickref=${AWIN_CLICKREF}&ued=${encodedUrl}`;
       }
-      
-      // Si no tenemos configuración de afiliados, devolver URL original
       return originalUrl;
-    } catch (error) {
-      console.error("Error generando enlace de afiliado:", error);
+    } catch {
       return originalUrl;
     }
   };
 
   const priceStats = getPriceStats();
   const affiliateLink = getAffiliateLink(
-    verificadorData.amazon_url || verificadorData.verificador_url, 
+    verificadorData.amazon_url || verificadorData.verificador_url,
     verificadorData.tienda
   );
 
@@ -237,7 +253,7 @@ export function ProductView({ verificadorData, amazonData }: ProductViewProps) {
                 </a>
               </Button>
             </div>
-            
+
             <Button asChild variant="outline" className="w-full" size="lg">
               <a href={affiliateLink} target="_blank" rel="noopener noreferrer">
                 <Eye className="mr-2 h-4 w-4 flex-shrink-0" />
@@ -245,20 +261,26 @@ export function ProductView({ verificadorData, amazonData }: ProductViewProps) {
                 <ExternalLink className="ml-2 h-4 w-4 flex-shrink-0" />
               </a>
             </Button>
-            
+
             <Button
               onClick={handleAnalyze}
-              disabled={isAnalyzing}
-              variant={analysis ? "default" : "outline"}
+              disabled={isAnalyzing || hasAnalyzed}
+              variant={analysis || hasAnalyzed ? "default" : "outline"}
               className="w-full"
               size="lg"
             >
               <Brain className="mr-2 h-4 w-4 flex-shrink-0" />
-              {isAnalyzing ? "Analizando con IA..." : analysis ? "✓ Análisis Completado" : "Análisis con IA"}
+              {isAnalyzing
+                ? "Analizando con IA..."
+                : hasAnalyzed
+                ? "✓ Análisis ya realizado"
+                : analysis
+                ? "✓ Análisis Completado"
+                : "Análisis con IA"}
             </Button>
           </div>
 
-          {/* Información adicional de Amazon */}
+          {/* Info adicional Amazon */}
           {amazonData?.product && (
             <div className="pt-4 border-t space-y-3">
               <div className="flex flex-wrap gap-4">
@@ -274,7 +296,7 @@ export function ProductView({ verificadorData, amazonData }: ProductViewProps) {
                 {amazonData.product.brand && (
                   <div className="px-3 py-1 bg-gray-50 rounded-full border border-gray-200">
                     <span className="text-sm">
-                      <span className="font-medium text-gray-700">Marca:</span> 
+                      <span className="font-medium text-gray-700">Marca:</span>
                       <span className="text-gray-600 ml-1">{amazonData.product.brand}</span>
                     </span>
                   </div>
@@ -317,7 +339,6 @@ export function ProductView({ verificadorData, amazonData }: ProductViewProps) {
       {/* Detalles del producto de Amazon */}
       {amazonData?.product && (
         <div className="grid lg:grid-cols-2 gap-6 sm:gap-8">
-          {/* Descripción */}
           {amazonData.product.description && (
             <Card>
               <CardHeader>
@@ -329,7 +350,6 @@ export function ProductView({ verificadorData, amazonData }: ProductViewProps) {
             </Card>
           )}
 
-          {/* Puntos clave */}
           {amazonData.product.bullet_points && (
             <Card>
               <CardHeader>
@@ -337,7 +357,7 @@ export function ProductView({ verificadorData, amazonData }: ProductViewProps) {
               </CardHeader>
               <CardContent>
                 <div className="space-y-1.5 sm:space-y-2">
-                  {amazonData.product.bullet_points.split('\n').map((point, index) => (
+                  {amazonData.product.bullet_points.split("\n").map((point, index) => (
                     <div key={index} className="flex items-start gap-2">
                       <div className="w-2 h-2 bg-primary rounded-full mt-2 flex-shrink-0" />
                       <span className="text-sm">{point.trim()}</span>
