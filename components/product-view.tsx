@@ -285,7 +285,7 @@ export function ProductView({ verificadorData, amazonData }: ProductViewProps) {
               <Button asChild variant="outline" className="w-full" size="lg">
                 <a href={affiliateLink} target="_blank" rel="noopener noreferrer">
                   <Package className="mr-2 h-4 w-4 flex-shrink-0" />
-                  Comprobar precio actual
+                  Precio actual
                 </a>
               </Button>
             </div>
