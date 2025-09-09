@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -24,10 +24,9 @@ interface ProductViewProps {
 }
 
 // === Config bloqueo IA ===
-const IA_BLOCK_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 días (ajústalo)
+const IA_BLOCK_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 días
 
 function makeAnalyzeKey(v: VerificadorResponse) {
-  // Usamos tienda + URL canónica si existe, si no, la URL de verificador
   const raw = (v.amazon_url || v.verificador_url || "").trim().toLowerCase();
   const tienda = (v.tienda || "desconocida").trim().toLowerCase();
   return `ai:analyzed:${tienda}:${raw}`;
@@ -40,7 +39,13 @@ export function ProductView({ verificadorData, amazonData }: ProductViewProps) {
   const analyzeKey = useMemo(() => makeAnalyzeKey(verificadorData), [verificadorData]);
   const [hasAnalyzed, setHasAnalyzed] = useState(false);
 
-  // Al montar, miramos si ya se analizó esta URL recientemente
+  // Ref a la sección de análisis para hacer scroll
+  const aiSectionRef = useRef<HTMLDivElement | null>(null);
+
+  const scrollToAI = () => {
+    aiSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
   useEffect(() => {
     try {
       const raw = localStorage.getItem(analyzeKey);
@@ -49,23 +54,31 @@ export function ProductView({ verificadorData, amazonData }: ProductViewProps) {
       if (!parsed?.ts) return;
       const fresh = Date.now() - parsed.ts < IA_BLOCK_TTL_MS;
       setHasAnalyzed(fresh);
-      // Limpieza si expiró
       if (!fresh) localStorage.removeItem(analyzeKey);
-    } catch {
-      // ignorar errores de parseo
-    }
+    } catch {/* ignore */}
   }, [analyzeKey]);
 
+  // Si termina un análisis nuevo, auto-desplaza a la sección
+  useEffect(() => {
+    if (analysis) {
+      // Espera un frame para asegurar que se ha renderizado el bloque
+      const id = setTimeout(scrollToAI, 50);
+      return () => clearTimeout(id);
+    }
+  }, [analysis]);
+
   const handleAnalyze = async () => {
-    // doble click guard: por si acaso
-    if (isAnalyzing || hasAnalyzed) return;
+    // Si ya estaba bloqueado, usamos el click como “ir a resultados”
+    if (hasAnalyzed) {
+      scrollToAI();
+      return;
+    }
+    if (isAnalyzing) return;
 
     setIsAnalyzing(true);
     try {
       const result = await analyze(amazonData?.product || null, verificadorData);
       setAnalysis(result);
-
-      // Sólo guardamos bloqueo si la llamada fue OK y la IA devolvió json
       if (result?.ok && result?.json) {
         localStorage.setItem(analyzeKey, JSON.stringify({ ts: Date.now() }));
         setHasAnalyzed(true);
@@ -80,32 +93,28 @@ export function ProductView({ verificadorData, amazonData }: ProductViewProps) {
 
   const formatPrice = (price: number | string) => {
     const numPrice = typeof price === "string" ? parseFloat(price) : price;
-    return new Intl.NumberFormat("es-ES", {
-      style: "currency",
-      currency: "EUR",
-    }).format(numPrice);
+    return new Intl.NumberFormat("es-ES", { style: "currency", currency: "EUR" }).format(numPrice);
   };
 
   const getPriceStats = () => {
     if (!verificadorData.has_serie_historica || verificadorData.serie_historica.length === 0) {
-      // Si no hay histórico, usar el precio de Amazon si está disponible, sino el precio destacado
       let currentPrice: number;
       if (amazonData?.product?.price) {
         currentPrice = amazonData.product.price;
       } else {
         const precioDestacado = verificadorData.precios_destacados[0]?.precio;
-        currentPrice = precioDestacado ? parseFloat(precioDestacado.replace(/[€\s]/g, '').replace(',', '.')) : 0;
+        currentPrice = precioDestacado ? parseFloat(precioDestacado.replace(/[€\s]/g, "").replace(",", ".")) : 0;
       }
       return {
         current: currentPrice,
         min: currentPrice,
         max: currentPrice,
         avg: currentPrice,
-        lastDate: verificadorData.precios_destacados[0]?.fecha || new Date().toISOString()
+        lastDate: verificadorData.precios_destacados[0]?.fecha || new Date().toISOString(),
       };
     }
 
-    const prices = verificadorData.serie_historica.map(item => item.precio);
+    const prices = verificadorData.serie_historica.map((item) => item.precio);
     const sortedData = [...verificadorData.serie_historica].sort(
       (a, b) => new Date(b.fecha).getTime() - new Date(a.fecha).getTime()
     );
@@ -125,7 +134,7 @@ export function ProductView({ verificadorData, amazonData }: ProductViewProps) {
       min: Math.min(...prices),
       max: Math.max(...prices),
       avg: prices.reduce((a, b) => a + b, 0) / prices.length,
-      lastDate
+      lastDate,
     };
   };
 
@@ -134,7 +143,6 @@ export function ProductView({ verificadorData, amazonData }: ProductViewProps) {
     return date.toLocaleDateString("es-ES", { year: "numeric", month: "short", day: "numeric" });
   };
 
-  // Enlace de afiliado (igual que tenías)
   const getAffiliateLink = (originalUrl: string, store: string) => {
     const AMAZON_TAG = "tagafiliado-21";
     const AWIN_AFFILIATE_ID = "123456";
@@ -264,16 +272,17 @@ export function ProductView({ verificadorData, amazonData }: ProductViewProps) {
 
             <Button
               onClick={handleAnalyze}
-              disabled={isAnalyzing || hasAnalyzed}
+              disabled={isAnalyzing /* solo bloqueamos por estado; el click redirige si hasAnalyzed */}
               variant={analysis || hasAnalyzed ? "default" : "outline"}
               className="w-full"
               size="lg"
+              title={hasAnalyzed ? "Ya hay un análisis. Haz clic para verlo." : undefined}
             >
               <Brain className="mr-2 h-4 w-4 flex-shrink-0" />
               {isAnalyzing
                 ? "Analizando con IA..."
                 : hasAnalyzed
-                ? "✓ Análisis ya realizado"
+                ? "Ver análisis con IA"
                 : analysis
                 ? "✓ Análisis Completado"
                 : "Análisis con IA"}
@@ -322,7 +331,9 @@ export function ProductView({ verificadorData, amazonData }: ProductViewProps) {
         </Card>
       )}
 
-      {/* Análisis con IA */}
+      {/* Análisis con IA (SECCIÓN DE DESTINO DE SCROLL) */}
+      <div ref={aiSectionRef} />
+
       {analysis && (
         <div className="mb-6 sm:mb-8">
           <div className="flex flex-col sm:flex-row sm:items-center gap-2 mb-4">
@@ -349,7 +360,6 @@ export function ProductView({ verificadorData, amazonData }: ProductViewProps) {
               </CardContent>
             </Card>
           )}
-
           {amazonData.product.bullet_points && (
             <Card>
               <CardHeader>
